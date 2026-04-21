@@ -5,7 +5,10 @@ Partial but durable understanding of the generic agent runtime and queue semanti
 ## Runtime boundary so far
 
 - `AgentSession.prompt()` in `packages/coding-agent` is the app-layer entrypoint.
-- It expands extension commands, skill commands, and prompt templates; handles `streamingBehavior`; validates auth/model state; builds the outgoing `AgentMessage[]`; then delegates with `this.agent.prompt(messages)`.
+- It performs app-level preflight before the generic agent runtime: extension command dispatch, extension input interception, skill expansion, prompt-template expansion, streaming queue routing, pending bash flush, model/auth checks, compaction checks, message assembly, and `before_agent_start` extension hooks.
+- Slash handling is ordered intentionally: extension commands get first shot, then `/skill:name ...` falls through to skill expansion if no extension command named `skill:name` exists.
+- `preflightResult?: (success: boolean) => void` is an internal acceptance/rejection callback for callers such as RPC mode. `true` means the input was accepted or handled during preflight; `false` means preflight threw before entering the main run.
+- `AgentSession.prompt()` delegates with `this.agent.prompt(messages)`, then also waits on `waitForRetry()`, so the app-level prompt only settles after any session-triggered auto-retry finishes.
 - `Agent` in `packages/agent` owns the live transcript/state, queue objects, event emission, tool scheduling mode, and the bridge into the low-level loop.
 - `agent-loop.ts` owns the actual turn loop: prompt injection, assistant streaming, tool execution, steering/follow-up injection, and stopping conditions.
 
@@ -20,6 +23,10 @@ Concretely, one turn can include:
 - the resulting `toolResult` messages
 
 Reasoning/thinking blocks do not create extra turns; they are content blocks inside the same assistant message.
+
+A prompt/run is larger than a single turn:
+- one `AgentSession.prompt(...)` call starts one agent run
+- that run may contain multiple turns if the assistant calls tools, steering messages arrive, or follow-up messages are injected
 
 ## Steering vs follow-up
 
@@ -48,6 +55,12 @@ If a turn produced tool results and a steering message was queued, the next LLM 
 "Allowed tools" in the docs means tool calls that passed preflight. It is not a built-in per-tool concurrency allowlist.
 
 Parallel scheduling does not forbid tool-level serialization. Example: coding-agent file mutation tools serialize same-file writes/edits with `withFileMutationQueue(...)` while still allowing different files to mutate in parallel.
+
+## Bash ordering note
+
+- `recordBashResult()` buffers bash execution messages while the agent is streaming.
+- `_flushPendingBashMessages()` writes those buffered messages into agent state and session history before the next normal prompt.
+- The reason is message ordering: Pi avoids inserting out-of-band bash messages in the middle of assistant/tool-use ordering.
 
 ## Agent state terminology
 
